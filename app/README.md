@@ -108,43 +108,71 @@ graph TB
 2. クライアントサイドでのデータ取得
 3. UI 状態管理
 
-## 3. フロントエンド設計
+## 3. 実装設計
 
 ### 3.1 ディレクトリ構造
 
 ```
-src/
-├── app/
-│   ├── layout.tsx                # ルートレイアウト
-│   ├── page.tsx                  # トップページ
-│   ├── loading.tsx               # ローディング
-│   ├── error.tsx                 # エラーページ
-│   ├── not-found.tsx             # 404ページ
-│   ├── books/
-│   │   ├── [id]/
-│   │   │   └── page.tsx         # 書籍詳細ページ
-│   │   └── page.tsx             # 書籍一覧ページ
-│   ├── categories/
-│   │   ├── page.tsx             # カテゴリー一覧
-│   │   └── [category]/
-│   │       └── page.tsx         # カテゴリー別ページ
-│   └── bestsellers/
-│       └── history/
-│           └── page.tsx         # 過去のベストセラー
-├── components/
-│   ├── ui/                      # shadcn/uiコンポーネント
-│   ├── layout/                  # レイアウトコンポーネント
-│   ├── home/                    # トップページ用コンポーネント
-│   ├── books/                   # 書籍関連コンポーネント
-│   └── shared/                  # 共通コンポーネント
-├── lib/
-│   ├── api/
-│   │   └── mock/                # モックデータ
-│   ├── hooks/                   # カスタムフック
-│   └── utils/                   # ユーティリティ関数
-├── types/                       # 型定義
-└── public/
-    └── images/                  # 静的画像
+.
+├── README.md                     # プロジェクト概要
+├── package.json                  # 依存関係定義
+├── next.config.js               # Next.js設定
+├── tailwind.config.js           # Tailwind CSS設定
+├── postcss.config.js            # PostCSS設定
+├── tsconfig.json                # TypeScript設定
+├── .env                         # 環境変数（git管理外）
+├── .env.example                 # 環境変数サンプル
+├── prisma/                      # Prismaの設定とマイグレーション
+│   ├── schema.prisma            # データベーススキーマ
+│   ├── migrations/              # マイグレーションファイル
+│   └── seed.ts                  # シードデータ
+│
+├── public/                      # 静的ファイル
+│   └── images/                  # 画像ファイル
+│
+├── src/                         # ソースコード
+│   ├── app/                     # Next.js App Router
+│   │   ├── layout.tsx           # ルートレイアウト
+│   │   ├── page.tsx             # トップページ
+│   │   ├── loading.tsx          # ローディング
+│   │   ├── error.tsx            # エラーページ
+│   │   ├── not-found.tsx        # 404ページ
+│   │   ├── books/
+│   │   │   ├── [id]/
+│   │   │   │   └── page.tsx     # 書籍詳細ページ
+│   │   │   └── page.tsx         # 書籍一覧ページ
+│   │   ├── categories/
+│   │   │   ├── [category]/
+│   │   │   │   └── page.tsx     # カテゴリー別ページ
+│   │   │   └── page.tsx         # カテゴリー一覧
+│   │   └── bestsellers/
+│   │       └── history/
+│   │           └── page.tsx     # 過去のベストセラー
+│   │
+│   ├── components/              # Reactコンポーネント
+│   │   ├── ui/                  # 共通UIコンポーネント
+│   │   ├── layout/             # レイアウトコンポーネント
+│   │   ├── books/              # 書籍関連コンポーネント
+│   │   └── shared/             # 共通コンポーネント
+│   │
+│   ├── lib/                    # ユーティリティ
+│   │   ├── prisma.ts           # Prismaクライアント
+│   │   ├── nyt/                # NYT API関連
+│   │   │   ├── client.ts       # APIクライアント
+│   │   │   └── types.ts        # 型定義
+│   │   ├── utils/              # ユーティリティ関数
+│   │   └── hooks/              # カスタムフック
+│   │
+│   ├── types/                  # 型定義
+│   │   ├── book.ts
+│   │   ├── review.ts
+│   │   └── category.ts
+│   │
+│   └── batch/                  # バッチ処理
+│       ├── update-books.ts     # 書籍データ更新バッチ
+│       └── utils/              # バッチ処理用ユーティリティ
+│
+└── vercel.json                 # Vercel設定
 ```
 
 ### 3.2 型定義
@@ -275,6 +303,175 @@ export interface Category {
 - エラー時のフォールバック UI
 - リトライ機能の実装
 - 404 ページの提供
+
+### 3.7 バッチ処理設計
+
+#### 3.7.1 基本設計
+
+**実行方法**
+
+- Vercel Cron Jobs を使用して Serverless Functions を定期的に呼び出し
+- 実行時間制限: 10 秒以内で処理を完了する必要あり
+- メモリ制限: 1024MB
+
+**実行スケジュール**
+
+```plaintext
+# vercel.json
+{
+  "crons": [
+    {
+      "path": "/api/batch/bestsellers",
+      "schedule": "0 9 * * *"     # 毎日午前9時
+    },
+    {
+      "path": "/api/batch/reviews",
+      "schedule": "0 */6 * * *"   # 6時間ごと
+    }
+  ]
+}
+```
+
+#### 3.7.2 実装例
+
+```typescript
+// src/app/api/batch/bestsellers/route.ts
+import { NextResponse } from "next/server";
+import { PrismaClient } from "@prisma/client";
+import { NytApiClient } from "@/lib/nyt/client";
+
+const prisma = new PrismaClient();
+const nytClient = new NytApiClient();
+
+// Vercel Serverless Functionのタイムアウト対策として
+// 処理を小分けにする
+async function updateBestsellerList(listName: string) {
+  const books = await nytClient.getBestsellersByList(listName);
+
+  // 一括更新用のデータを準備
+  const upsertData = books.map((book) => ({
+    where: { isbn13: book.isbn13 },
+    update: {
+      rank: book.rank,
+      rankLastWeek: book.rankLastWeek,
+      weeksOnList: book.weeksOnList,
+      updatedAt: new Date(),
+    },
+    create: {
+      isbn13: book.isbn13,
+      title: book.title,
+      author: book.author,
+      // ... その他の初期データ
+    },
+  }));
+
+  // トランザクションで一括更新
+  await prisma.$transaction(upsertData.map((data) => prisma.book.upsert(data)));
+}
+
+export async function POST(request: Request) {
+  try {
+    // 処理対象のリスト取得
+    const lists = ["hardcover-fiction", "hardcover-nonfiction"];
+
+    // 並列処理で実行時間を短縮
+    await Promise.all(lists.map((list) => updateBestsellerList(list)));
+
+    return NextResponse.json({
+      success: true,
+      message: "Bestseller lists updated",
+    });
+  } catch (error) {
+    console.error("Batch processing error:", error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Update failed",
+      },
+      { status: 500 }
+    );
+  }
+}
+```
+
+#### 3.7.3 最適化のポイント
+
+**1. 処理の分割**
+
+- Serverless Functions の実行時間制限（10 秒）を考慮
+- 大きな処理は複数の関数に分割
+- 必要に応じて処理をチェーン化
+
+```typescript
+// 処理のチェーン化例
+async function processList(listName: string) {
+  // 1. 最初のバッチで基本データを更新
+  await fetch("/api/batch/bestsellers", {
+    method: "POST",
+    body: JSON.stringify({ list: listName }),
+  });
+
+  // 2. 次のバッチで詳細データを更新
+  await fetch("/api/batch/book-details", {
+    method: "POST",
+    body: JSON.stringify({ list: listName }),
+  });
+}
+```
+
+**2. データベースアクセスの最適化**
+
+- 一括更新の活用
+- インデックスの適切な設定
+- 不要なクエリの削除
+
+**3. エラーハンドリング**
+
+```typescript
+// リトライ機能の実装例
+async function withRetry<T>(fn: () => Promise<T>, retries = 3): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    if (retries > 0) {
+      await new Promise((r) => setTimeout(r, 1000));
+      return withRetry(fn, retries - 1);
+    }
+    throw error;
+  }
+}
+```
+
+#### 3.7.4 監視とログ
+
+**実行ログ**
+
+```typescript
+// src/lib/logger.ts
+export async function logBatchExecution(
+  batchName: string,
+  status: string,
+  details: any
+) {
+  await prisma.batchLog.create({
+    data: {
+      batchName,
+      status,
+      executionDate: new Date(),
+      details: JSON.stringify(details),
+    },
+  });
+}
+```
+
+**監視項目**
+
+- 実行成功/失敗の記録
+- 処理時間の計測
+- 更新レコード数の記録
+- エラー内容の保存
+
+これらのログは Vercel Dashboard で確認可能です。
 
 ## 4. システムの特徴
 
